@@ -65,3 +65,6 @@ for iteration in range(NUM_IMAGES):
     frame_idx += 1
 
 print(f"\nAll {NUM_IMAGES} images (with interleaved black frames) generated and saved!")
+
+
+## checking ##

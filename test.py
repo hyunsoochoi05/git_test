@@ -3,7 +3,10 @@ import matplotlib.pyplot as plt
 import os
 import numpy as np
 from datetime import datetime
-from helper import generate_positions, draw_grid, draw_box, draw_ball, setup_axes
+import helper
+
+# use Euclidean distance-based sampling (area-uniform radius)
+helper.RANDOM_FLAG = 1
 
 # Grid dimensions and render settings
 width, height = 8, 6
@@ -11,7 +14,7 @@ scale_factor = 0.8  # Perspective scaling factor
 fig_size = (8, 6)
 output_dpi = 100
 
-NUM_IMAGES = 300  # Number of non-black images to generate
+NUM_IMAGES = 100  # Number of non-black images to generate
 
 # Allowed colors for box and ball
 COLOR_CHOICES = ['green', 'red', 'blue', 'white']
@@ -24,24 +27,24 @@ frame_idx = 1
 # Generate images according to NUM_IMAGES
 for iteration in range(NUM_IMAGES):
     # Generate random positions for box and ball
-    box_pos, ball_pos = generate_positions(width, height)
+    box_pos, ball_pos = helper.generate_positions(width, height)
 
     # Create figure and axis
     fig, ax = plt.subplots(1, 1, figsize=fig_size)
 
     # Draw grid and objects
-    draw_grid(ax, width, height, scale_factor)
+    helper.draw_grid(ax, width, height, scale_factor)
     # Choose distinct colors for this frame
     box_color = COLOR_CHOICES[1]    # box_color = random.choice(COLOR_CHOICES)
     ball_color = COLOR_CHOICES[2]   #ball_color = random.choice(COLOR_CHOICES)
     # while ball_color == box_color:
         # ball_color = random.choice(COLOR_CHOICES)
 
-    draw_box(ax, box_pos, width, scale_factor, height, color=box_color)
-    draw_ball(ax, ball_pos, width, scale_factor, height, color=ball_color)
+    helper.draw_box(ax, box_pos, width, scale_factor, height, color=box_color)
+    helper.draw_ball(ax, ball_pos, width, scale_factor, height, color=ball_color)
     
     # Setup axes appearance
-    setup_axes(ax, height)
+    helper.setup_axes(ax, height)
     plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
     # Save the regular image
@@ -65,10 +68,3 @@ for iteration in range(NUM_IMAGES):
     frame_idx += 1
 
 print(f"\nAll {NUM_IMAGES} images (with interleaved black frames) generated and saved!")
-
-
-## checking ##
-
-## third commit check ##
-
-## fourth commit check ##

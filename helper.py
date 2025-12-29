@@ -33,45 +33,6 @@ def _uniform_sampling(width, height):
         ball_pos = (random.randint(0, width - 3), random.randint(0, height - 1))
     
     return box_pos, ball_pos
-
-def _distance_based_sampling(width, height):
-    """Polar distance+direction sampling:
-    - sample one point uniformly (box)
-    - sample distance and direction uniformly
-    - compute second point (ball) from polar coords and clamp to grid
-    """
-    min_distance = 1.0
-    # maximum possible Euclidean distance given the grid bounds
-    max_distance = math.hypot(max(0, width - 3), max(0, height - 1))
-    max_attempts = 200
-
-    for _ in range(max_attempts):
-        # sample base point (one object) uniformly as before
-        x0 = random.randint(0, width - 3)
-        y0 = random.randint(0, height - 1)
-
-        # sample distance and direction uniformly
-        dist = random.uniform(min_distance, max_distance)
-        angle = random.uniform(-math.pi, math.pi)
-
-        # compute target using polar -> cartesian, then round to nearest grid cell
-        x1 = int(round(x0 + dist * math.cos(angle)))
-        y1 = int(round(y0 + dist * math.sin(angle)))
-
-        # clamp to valid grid ranges
-        x1 = max(0, min(width - 3, x1))
-        y1 = max(0, min(height - 1, y1))
-
-        box_pos = (x0, y0)
-        ball_pos = (x1, y1)
-
-        if ball_pos != box_pos:
-            return box_pos, ball_pos
-    # fallback to uniform sampling if unable to place after attempts
-        return _uniform_sampling(width, height)
-    # ...existing code...
-
-
 def _stratified_sampling(width, height):
     """Stratified sampling - divide grid into regions and sample uniformly from each."""
     # Divide grid into 2x2 regions
@@ -108,23 +69,31 @@ def _stratified_sampling(width, height):
     return box_pos, ball_pos
 
 
-def _distance_based_sampling(width, height):
-    """Distance-based sampling - ensure minimum distance between box and ball."""
-    min_distance = 2
-    max_distance = 10
-    max_attempts = 100
-    
+def _distance_based_sampling(width, height, r_min=1.0, r_max=None, max_attempts=200):
+    """Euclidean distance-based sampling with area-uniform radius.
+
+    Samples a base grid cell (box) uniformly, then samples a random angle and
+    a radius r such that points are uniformly distributed over the disk area
+    between r_min and r_max (i.e. r^2 uniform). Returns integer grid cells
+    for box and ball; clamps to grid and falls back to uniform sampling on
+    failure.
+    """
+    if r_max is None:
+        r_max = math.hypot(width - 1, height - 1)
+
     for _ in range(max_attempts):
-        box_pos = (random.randint(0, width - 3), random.randint(0, height - 1))
-        ball_pos = (random.randint(0, width - 3), random.randint(0, height - 1))
-        
-        # Calculate Manhattan distance
-        distance = abs(box_pos[0] - ball_pos[0]) + abs(box_pos[1] - ball_pos[1])
-        
-        if min_distance <= distance <= max_distance:
-            return box_pos, ball_pos
-    
-    # Fallback to uniform sampling if max attempts exceeded
+        x0 = random.randint(0, width - 1)
+        y0 = random.randint(0, height - 1)
+        theta = random.uniform(0, 2 * math.pi)
+        # 균등 면적: r^2 균등 -> r = sqrt(U(r_min^2, r_max^2))
+        r = math.sqrt(random.uniform(r_min ** 2, r_max ** 2))
+        x1 = int(round(x0 + r * math.cos(theta)))
+        y1 = int(round(y0 + r * math.sin(theta)))
+        x1 = max(0, min(width - 1, x1))
+        y1 = max(0, min(height - 1, y1))
+        if (x1, y1) != (x0, y0):
+            return (x0, y0), (x1, y1)
+
     return _uniform_sampling(width, height)
 
 

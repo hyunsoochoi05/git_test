@@ -5,8 +5,10 @@ import numpy as np
 from datetime import datetime
 import helper
 
-# use Euclidean distance-based sampling (area-uniform radius)
-helper.RANDOM_FLAG = 1
+# --- Configuration ---
+# Set sampling strategy: 0=stratified, 1=distance-based, 2=uniform, 3=sobol, 4=_sobol_relative_polar_sampling, 5=_stratified_polar_sampling
+# We set it to 3 to use the new Sobol sequence sampler.
+helper.RANDOM_FLAG = 3
 
 # Grid dimensions and render settings
 width, height = 8, 6

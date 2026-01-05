@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 from scipy.stats import qmc
 import itertools
 
-# Sampling strategy flag: 0=stratified, 1=distance-based, 2=uniform, 3=sobol_cartesian, 4=sobol_polar, 5=stratified_polar, 6=stratified_difficulty, 7=stratified_hand_difficulty, 8=simple_random, 9=numpy_random, 10=redundancy_aware, 11=sobol_ball_diversity
-RANDOM_FLAG = 11
+# Sampling strategy flag: 0=stratified, 1=distance-based, 2=uniform, 3=sobol_cartesian, 4=sobol_polar, 5=stratified_polar, 6=stratified_difficulty, 7=stratified_hand_difficulty, 8=simple_random, 9=numpy_random, 10=redundancy_aware, 11=sobol_ball_diversity, 12=balanced_spatial
+RANDOM_FLAG = 12
 
 # Global counter to track fallback events in distance-based sampling
 FALLBACK_COUNT = 0
@@ -565,6 +565,7 @@ def _initialize_redundancy_aware_sampler(n_samples, width, height):
         # p1: Box, p2: Ball
         vec = (p2[0] - p1[0], p2[1] - p1[1])
         traj_len = math.hypot(vec[0], vec[1])
+        angle = math.atan2(vec[1], vec[0])
         
         # Score Calculation
         # A. Anchor Priority
@@ -575,11 +576,15 @@ def _initialize_redundancy_aware_sampler(n_samples, width, height):
         
         # Total Score (Weights: Anchor > Length)
         final_score = (is_anchor * 2.0) + (score_len * 1.5)
+        # Add random noise to make the priority 'soft' rather than 'hard'.
+        noise = random.uniform(0, 2.0)
+        final_score = (is_anchor * 2.0) + (score_len * 1.5) + noise
         
         candidates.append({
             'pair': (p1, p2),
             'box': p1,
             'vec': vec,
+            'angle': angle,
             'score': final_score
         })
         
@@ -593,6 +598,8 @@ def _initialize_redundancy_aware_sampler(n_samples, width, height):
     # Thresholds for redundancy (Tunable)
     thresh_pos = 1.5  # Box position similarity threshold
     thresh_vec = 0.9  # Relative vector similarity threshold (Lowered to distinguish dist 1 from 2)
+    thresh_angle = 0.1 # Angle similarity threshold (radians)
+    thresh_pos_parallel = 2.5 # Stricter position threshold for parallel vectors
     
     for cand in candidates:
         is_redundant = False
@@ -602,6 +609,14 @@ def _initialize_redundancy_aware_sampler(n_samples, width, height):
             d_vec = math.hypot(cand['vec'][0] - s['vec'][0], cand['vec'][1] - s['vec'][1])
             
             if d_pos < thresh_pos and d_vec < thresh_vec:
+                is_redundant = True
+                break
+            
+            # Check for parallel vectors (Same Direction)
+            angle_diff = abs(cand['angle'] - s['angle'])
+            if angle_diff > math.pi: angle_diff = 2*math.pi - angle_diff
+            
+            if angle_diff < thresh_angle and d_pos < thresh_pos_parallel:
                 is_redundant = True
                 break
         
@@ -708,6 +723,80 @@ def _sobol_ball_diversity_sampling(width, height):
         print("Error: Ran out of samples.")
         return _uniform_sampling(width, height)
 
+# (12)
+def _initialize_balanced_spatial_sampler(n_samples, width, height):
+    """
+    Balanced Spatial Sampling (Flag 12).
+    Balances between Vector Diversity and Box Spatial Uniformity.
+    Method 11 tends to cluster boxes at edges to satisfy rare vectors.
+    Method 12 adds a penalty for repeated box positions to encourage spatial uniformity.
+    """
+    global _stratified_polar_sampler_iterator
+    
+    print(f"Balanced Spatial Sampling: Computing pairs for grid ({width}x{height})...")
+    
+    # 1. Generate Ball positions using Sobol (d=2)
+    sampler = qmc.Sobol(d=2, scramble=True)
+    sobol_points = sampler.random(n_samples)
+    
+    ball_positions = []
+    for p in sobol_points:
+        bx = int(p[0] * width)
+        by = int(p[1] * height)
+        bx = min(max(bx, 0), width - 1)
+        by = min(max(by, 0), height - 1)
+        ball_positions.append((bx, by))
+        
+    # 2. Select Box for each Ball
+    vector_counts = collections.defaultdict(int)
+    box_counts = collections.defaultdict(int)
+    final_samples = []
+    all_grid_points = list(itertools.product(range(width), range(height)))
+    
+    for ball_pos in ball_positions:
+        current_candidates = list(all_grid_points)
+        random.shuffle(current_candidates)
+        
+        best_box = None
+        min_score = float('inf')
+        
+        for box_pos in current_candidates:
+            if box_pos == ball_pos: continue
+            
+            vec = (ball_pos[0] - box_pos[0], ball_pos[1] - box_pos[1])
+            dist = math.hypot(vec[0], vec[1])
+            
+            # Score minimizes both vector usage and box usage.
+            # (v_count + b_count) ensures we pick rare vectors AND rare box positions.
+            # dist is added as a tie-breaker to prioritize short distances early (preventing starvation).
+            score = (vector_counts[vec] + box_counts[box_pos]) * 1000 + dist
+            
+            if score < min_score:
+                min_score = score
+                best_box = box_pos
+        
+        if best_box is not None:
+            final_samples.append((best_box, ball_pos))
+            vec = (ball_pos[0] - best_box[0], ball_pos[1] - best_box[1])
+            vector_counts[vec] += 1
+            box_counts[best_box] += 1
+            
+    random.shuffle(final_samples)
+    _stratified_polar_sampler_iterator = iter(final_samples)
+    print(f"Balanced Spatial Sampling: Prepared {len(final_samples)} samples.")
+
+def _balanced_spatial_sampling(width, height):
+    global _stratified_polar_sampler_iterator
+    if _stratified_polar_sampler_iterator is None:
+        print("Notice: Balanced Spatial sampler not initialized. Auto-initializing (N=1000)...")
+        _initialize_balanced_spatial_sampler(1000, width, height)
+    
+    try:
+        return next(_stratified_polar_sampler_iterator)
+    except StopIteration:
+        print("Error: Ran out of samples.")
+        return _uniform_sampling(width, height)
+
 
 # --- Drawing and Plotting ---
 
@@ -763,18 +852,24 @@ def show_sampling_distribution_hist(sampling_func, width, height, n_samples=500,
     samples = [sampling_func(width, height) for _ in range(n_samples)]
     dists, thetas = [], []
     dx_list, dy_list = [], []
+    ball_x_list, ball_y_list = [], []
+    box_x_list, box_y_list = [], []
     for box_pos, ball_pos in samples:
         dx, dy = ball_pos[0] - box_pos[0], ball_pos[1] - box_pos[1]
         dists.append(math.sqrt(dx**2 + dy**2))
         thetas.append(math.atan2(dy, dx))
         dx_list.append(dx)
         dy_list.append(dy)
+        ball_x_list.append(ball_pos[0])
+        ball_y_list.append(ball_pos[1])
+        box_x_list.append(box_pos[0])
+        box_y_list.append(box_pos[1])
 
     # Report fallback statistics if applicable
     if sampling_func.__name__ == '_distance_based_sampling' or (sampling_func.__name__ == 'generate_positions' and RANDOM_FLAG == 1):
         print(f"Fallback to Uniform Sampling: {FALLBACK_COUNT}/{n_samples} ({FALLBACK_COUNT/n_samples*100:.2f}%)")
 
-    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+    fig, axes = plt.subplots(1, 5, figsize=(32, 6))
     func_name = sampling_func.__name__.replace('_', ' ').title()
     fig.suptitle(f'Distribution for {n_samples} Samples ({func_name})', fontsize=16)
 
@@ -789,6 +884,9 @@ def show_sampling_distribution_hist(sampling_func, width, height, n_samples=500,
 
     print('\nDistance histogram (bin_range -> count):')
     for i in range(len(r_counts)): print(f'  [{r_edges[i]:.2f}, {r_edges[i+1]:.2f}) -> {r_counts[i]}')
+    
+    if len(dists) > 0:
+        print(f"  [Stats] Min Dist: {min(dists):.4f} (Excludes 0.0), Max Dist: {max(dists):.4f}")
 
     # Theta Histogram
     thetas_positive = [(t + 2 * math.pi) % (2 * math.pi) for t in thetas]
@@ -804,7 +902,7 @@ def show_sampling_distribution_hist(sampling_func, width, height, n_samples=500,
     bins_x = np.arange(-(width - 1) - 0.5, width + 0.5, 1)
     bins_y = np.arange(-(height - 1) - 0.5, height + 0.5, 1)
     
-    h = axes[2].hist2d(dx_list, dy_list, bins=[bins_x, bins_y], cmap='Purples', cmin=1)
+    h = axes[2].hist2d(dx_list, dy_list, bins=[bins_x, bins_y], cmap='Purples', vmin=0)
     axes[2].set_title(f'Relative Position Density (N={n_samples})')
     axes[2].set_xlabel('dx')
     axes[2].set_ylabel('dy')
@@ -813,6 +911,30 @@ def show_sampling_distribution_hist(sampling_func, width, height, n_samples=500,
     axes[2].grid(True, linestyle='--', alpha=0.3)
     axes[2].set_aspect('equal')
     fig.colorbar(h[3], ax=axes[2], label='Count')
+
+    # Ball Position Density (2D Histogram)
+    bins_ball_x = np.arange(-0.5, width + 0.5, 1)
+    bins_ball_y = np.arange(-0.5, height + 0.5, 1)
+    h_ball = axes[3].hist2d(ball_x_list, ball_y_list, bins=[bins_ball_x, bins_ball_y], cmap='Blues', vmin=0)
+    axes[3].set_title(f'Ball Position Density (N={n_samples})')
+    axes[3].set_xlabel('Ball X')
+    axes[3].set_ylabel('Ball Y')
+    axes[3].set_aspect('equal')
+    axes[3].invert_yaxis()
+    axes[3].grid(True, linestyle='--', alpha=0.3)
+    fig.colorbar(h_ball[3], ax=axes[3], label='Count')
+
+    # Box Position Density (2D Histogram)
+    bins_box_x = np.arange(-0.5, width + 0.5, 1)
+    bins_box_y = np.arange(-0.5, height + 0.5, 1)
+    h_box = axes[4].hist2d(box_x_list, box_y_list, bins=[bins_box_x, bins_box_y], cmap='Reds', vmin=0)
+    axes[4].set_title(f'Box Position Density (N={n_samples})')
+    axes[4].set_xlabel('Box X')
+    axes[4].set_ylabel('Box Y')
+    axes[4].set_aspect('equal')
+    axes[4].invert_yaxis()
+    axes[4].grid(True, linestyle='--', alpha=0.3)
+    fig.colorbar(h_box[3], ax=axes[4], label='Count')
 
     print('\nTheta histogram (radians) (bin_range -> count):')
     for i in range(len(th_counts)): print(f'  [{theta_edges[i]:.2f}, {theta_edges[i+1]:.2f}) -> {th_counts[i]}')
@@ -841,6 +963,8 @@ def init_sampler(width, height, n_samples, r_bins=None, theta_bins=None):
         _initialize_redundancy_aware_sampler(n_samples, width, height)
     elif RANDOM_FLAG == 11:
         _initialize_sobol_ball_diversity_sampler(n_samples, width, height)
+    elif RANDOM_FLAG == 12:
+        _initialize_balanced_spatial_sampler(n_samples, width, height)
 
 def generate_positions(width, height):
     """
@@ -871,6 +995,8 @@ def generate_positions(width, height):
         return _redundancy_aware_sampling(width, height)
     elif RANDOM_FLAG == 11:
         return _sobol_ball_diversity_sampling(width, height)
+    elif RANDOM_FLAG == 12:
+        return _balanced_spatial_sampling(width, height)
     else:
         # Default to uniform sampling if the flag is not recognized
         return _uniform_sampling(width, height)
@@ -878,8 +1004,8 @@ def generate_positions(width, height):
 
 if __name__ == '__main__':
     # Test Configuration: Change this flag to test different strategies
-    # 0:Stratified, 1:Distance-Based, 2:Uniform, 3:Sobol-Cartesian, 4:Sobol-Polar, 5:Stratified-Polar, 6:Stratified-Difficulty, 7:Stratified-Hand-Difficulty, 8:Simple-Random, 9:Numpy-Random, 10:Redundancy-Aware, 11:Sobol-Ball-Diversity
-    RANDOM_FLAG = 11
+    # 0:Stratified, 1:Distance-Based, 2:Uniform, 3:Sobol-Cartesian, 4:Sobol-Polar, 5:Stratified-Polar, 6:Stratified-Difficulty, 7:Stratified-Hand-Difficulty, 8:Simple-Random, 9:Numpy-Random, 10:Redundancy-Aware, 11:Sobol-Ball-Diversity, 12=Balanced-Spatial
+    RANDOM_FLAG = 12
 
     grid_width, grid_height = 8, 6
     n_samples_for_hist = 2000

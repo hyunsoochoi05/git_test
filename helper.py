@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 from scipy.stats import qmc
 import itertools
 
-# Sampling strategy flag: 0=stratified, 1=distance-based, 2=uniform, 3=sobol_cartesian, 4=sobol_polar, 5=stratified_polar, 6=stratified_difficulty, 7=stratified_hand_difficulty, 8=simple_random, 9=numpy_random, 10=redundancy_aware, 11=sobol_ball_diversity, 12=balanced_spatial
-RANDOM_FLAG = 12
+# Sampling strategy flag: 0=stratified, 1=distance-based, 2=uniform, 3=sobol_cartesian, 4=sobol_polar, 5=stratified_polar, 6=stratified_difficulty, 7=stratified_hand_difficulty, 8=simple_random, 9=numpy_random, 10=redundancy_aware, 11=sobol_ball_diversity, 12=balanced_spatial, 13=edge_biased_spatial, 14=edge_biased_spatial_v2, 15=deterministic_spatial, 16=fully_deterministic_spatial, 17=fully_deterministic_spatial_v3
+RANDOM_FLAG = 17
 
 # Global counter to track fallback events in distance-based sampling
 FALLBACK_COUNT = 0
@@ -768,8 +768,9 @@ def _initialize_balanced_spatial_sampler(n_samples, width, height):
             
             # Score minimizes both vector usage and box usage.
             # (v_count + b_count) ensures we pick rare vectors AND rare box positions.
-            # dist is added as a tie-breaker to prioritize short distances early (preventing starvation).
-            score = (vector_counts[vec] + box_counts[box_pos]) * 1000 + dist
+            # dist is added as a tie-breaker. Since short vectors (e.g. dist=1) are geometrically rare,
+            # we must prioritize them when counts are tied to ensure they are included (preventing starvation).
+            score = (vector_counts[vec] + box_counts[box_pos]) #* 1000 + dist
             
             if score < min_score:
                 min_score = score
@@ -790,6 +791,496 @@ def _balanced_spatial_sampling(width, height):
     if _stratified_polar_sampler_iterator is None:
         print("Notice: Balanced Spatial sampler not initialized. Auto-initializing (N=1000)...")
         _initialize_balanced_spatial_sampler(1000, width, height)
+    
+    try:
+        return next(_stratified_polar_sampler_iterator)
+    except StopIteration:
+        print("Error: Ran out of samples.")
+        return _uniform_sampling(width, height)
+
+# (13)
+def _initialize_edge_biased_spatial_sampler(n_samples, width, height):
+    """
+    Edge-Biased Spatial Sampling (Flag 13) - Original Version.
+    1. Samples Ball positions using a Beta(0.5, 0.5) distribution to favor edges/corners.
+       This ensures we have candidates capable of forming long/rare vectors.
+    2. Selects Box positions greedily to minimize vector count variance.
+    """
+    global _stratified_polar_sampler_iterator
+    
+    print(f"Edge-Biased Spatial Sampling: Computing pairs for grid ({width}x{height})...")
+    
+    ball_positions = []
+    # Beta(0.5, 0.5) is U-shaped, favoring 0 and 1 (edges).
+    alpha, beta = 0.5, 0.5
+    
+    for _ in range(n_samples):
+        # Beta distribution returns [0, 1]. Map to [0, width-1].
+        bx = int(random.betavariate(alpha, beta) * width)
+        by = int(random.betavariate(alpha, beta) * height)
+        bx = min(max(bx, 0), width - 1)
+        by = min(max(by, 0), height - 1)
+        ball_positions.append((bx, by))
+        
+    vector_counts = collections.defaultdict(int)
+    box_counts = collections.defaultdict(int)
+    final_samples = []
+    all_grid_points = list(itertools.product(range(width), range(height)))
+    
+    for ball_pos in ball_positions:
+        # Shuffle to ensure random selection among equal scores
+        current_candidates = list(all_grid_points)
+        random.shuffle(current_candidates)
+        
+        best_box = None
+        min_score = float('inf')
+        
+        for box_pos in current_candidates:
+            if box_pos == ball_pos: continue
+            
+            vec_x = ball_pos[0] - box_pos[0]
+            vec_y = ball_pos[1] - box_pos[1]
+            vec = (vec_x, vec_y)
+            
+            # Hierarchical Score:
+            # 1. Vector Count (Primary): We want flat vector histogram.
+            # 2. Box Count (Secondary): We want to use different box positions if possible.
+            # 3. Random (Tertiary): Break ties randomly (crucial to avoid geometric bias).
+            score = (vector_counts[vec] * 10000) + (box_counts[box_pos] * 10) + random.random()
+            
+            if score < min_score:
+                min_score = score
+                best_box = box_pos
+        
+        if best_box is not None:
+            final_samples.append((best_box, ball_pos))
+            vec = (ball_pos[0] - best_box[0], ball_pos[1] - best_box[1])
+            vector_counts[vec] += 1
+            box_counts[best_box] += 1
+            
+    random.shuffle(final_samples)
+    _stratified_polar_sampler_iterator = iter(final_samples)
+    print(f"Edge-Biased Spatial Sampling: Prepared {len(final_samples)} samples.")
+
+def _edge_biased_spatial_sampling(width, height):
+    global _stratified_polar_sampler_iterator
+    if _stratified_polar_sampler_iterator is None:
+        print("Notice: Edge-Biased Spatial sampler not initialized. Auto-initializing (N=1000)...")
+        _initialize_edge_biased_spatial_sampler(1000, width, height)
+    
+    try:
+        return next(_stratified_polar_sampler_iterator)
+    except StopIteration:
+        print("Error: Ran out of samples.")
+        return _uniform_sampling(width, height)
+
+# (14)
+def _initialize_edge_biased_spatial_sampler_v2(n_samples, width, height):
+    """
+    Edge-Biased Spatial Sampling V2 (Flag 14) - Improved Version.
+    Includes 'availability' weighting to prioritize geometrically rare vectors (long distances)
+    when ball is at the edge.
+    """
+    global _stratified_polar_sampler_iterator
+    
+    print(f"Edge-Biased Spatial Sampling V2: Computing pairs for grid ({width}x{height})...")
+    
+    ball_positions = []
+    # Relaxed Beta parameters from 0.5 to 0.75 to mitigate excessive corner clustering
+    alpha, beta = 0.85, 0.85
+    
+    for _ in range(n_samples):
+        bx = int(random.betavariate(alpha, beta) * width)
+        by = int(random.betavariate(alpha, beta) * height)
+        bx = min(max(bx, 0), width - 1)
+        by = min(max(by, 0), height - 1)
+        ball_positions.append((bx, by))
+        
+    vector_counts = collections.defaultdict(int)
+    box_counts = collections.defaultdict(int)
+    final_samples = []
+    all_grid_points = list(itertools.product(range(width), range(height)))
+    
+    for ball_pos in ball_positions:
+        current_candidates = list(all_grid_points)
+        random.shuffle(current_candidates)
+        
+        best_box = None
+        min_score = float('inf')
+        
+        for box_pos in current_candidates:
+            if box_pos == ball_pos: continue
+            
+            vec_x = ball_pos[0] - box_pos[0]
+            vec_y = ball_pos[1] - box_pos[1]
+            vec = (vec_x, vec_y)
+            
+            availability = (width - abs(vec_x)) * (height - abs(vec_y))
+            
+            # Increased vector_counts weight (100 -> 1000) to ensure we fill empty bins (count 0)
+            # before repeating rare vectors. Max availability is approx W*H (e.g., 48),
+            # so weight must be > 48*3 to prevent availability from overriding count.
+            score = (vector_counts[vec] * 1000) + (availability * 3) + (box_counts[box_pos] * 1) + random.random()
+            
+            if score < min_score:
+                min_score = score
+                best_box = box_pos
+        
+        if best_box is not None:
+            final_samples.append((best_box, ball_pos))
+            vec = (ball_pos[0] - best_box[0], ball_pos[1] - best_box[1])
+            vector_counts[vec] += 1
+            box_counts[best_box] += 1
+            
+    random.shuffle(final_samples)
+    _stratified_polar_sampler_iterator = iter(final_samples)
+    print(f"Edge-Biased Spatial Sampling V2: Prepared {len(final_samples)} samples.")
+
+def _edge_biased_spatial_sampling_v2(width, height):
+    global _stratified_polar_sampler_iterator
+    if _stratified_polar_sampler_iterator is None:
+        print("Notice: Edge-Biased Spatial V2 sampler not initialized. Auto-initializing (N=1000)...")
+        _initialize_edge_biased_spatial_sampler_v2(1000, width, height)
+    
+    try:
+        return next(_stratified_polar_sampler_iterator)
+    except StopIteration:
+        print("Error: Ran out of samples.")
+        return _uniform_sampling(width, height)
+
+# (15)
+def _initialize_deterministic_spatial_sampler(n_samples, width, height):
+    """
+    Deterministic Spatial Sampling (Flag 15).
+    Completely removes randomness to achieve maximum uniformity for both
+    Relative Positions (Vectors) and Absolute Positions (Box/Ball).
+    
+    Strategy:
+    1. Enumerate all possible vectors and assign target counts (N / |V|).
+    2. Sort tasks by 'availability' (rare vectors first).
+    3. Greedily select positions to minimize total occupancy of grid cells.
+    4. Use deterministic tie-breaking (round-robin offset) to spread samples.
+    """
+    global _stratified_polar_sampler_iterator
+    
+    print(f"Deterministic Spatial Sampling: Computing pairs for grid ({width}x{height})...")
+    
+    # 1. Identify all valid vectors and their availability
+    vectors = []
+    for dy in range(-(height - 1), height):
+        for dx in range(-(width - 1), width):
+            if dx == 0 and dy == 0: continue
+            # Availability: Number of valid positions for this vector
+            avail = (width - abs(dx)) * (height - abs(dy))
+            vectors.append({'vec': (dx, dy), 'avail': avail})
+            
+    # 2. Determine counts per vector
+    # Sort by availability (ascending) to handle remainder distribution logic
+    vectors.sort(key=lambda x: x['avail'])
+    
+    num_vectors = len(vectors)
+    base_count = n_samples // num_vectors
+    remainder = n_samples % num_vectors
+    
+    tasks = []
+    for i, item in enumerate(vectors):
+        count = base_count
+        # Distribute remainder to vectors with HIGHEST availability (end of list).
+        # These are short vectors that are flexible and easy to place without clustering.
+        if i >= (num_vectors - remainder):
+            count += 1
+        for _ in range(count):
+            tasks.append(item)
+            
+    # 3. Sort tasks by availability (Rare First) for processing
+    # Processing rare vectors first forces them to take edges.
+    # Then common vectors will naturally fill the center to balance absolute usage.
+    tasks.sort(key=lambda x: x['avail'])
+    
+    # 4. Greedy Filling
+    # Tracks how many times a grid cell has been used (as either box or ball)
+    position_counts = collections.defaultdict(int)
+    final_samples = []
+    
+    for i, task in enumerate(tasks):
+        dx, dy = task['vec']
+        
+        # Find all valid boxes for this vector
+        min_bx, max_bx = max(0, -dx), min(width, width - dx)
+        min_by, max_by = max(0, -dy), min(height, height - dy)
+        
+        valid_boxes = []
+        for by in range(min_by, max_by):
+            for bx in range(min_bx, max_bx):
+                valid_boxes.append((bx, by))
+        
+        best_pair = None
+        min_score = float('inf')
+        
+        # Deterministic Tie-Breaker:
+        # Start search from a different index each time to avoid clustering.
+        # Using a prime multiplier ensures we cycle through candidates.
+        offset = (i * 7919) % len(valid_boxes)
+        
+        for k in range(len(valid_boxes)):
+            idx = (k + offset) % len(valid_boxes)
+            bx, by = valid_boxes[idx]
+            lx, ly = bx + dx, by + dy
+            
+            # Score: Minimize total usage of these two cells
+            score = position_counts[(bx, by)] + position_counts[(lx, ly)]
+            
+            if score < min_score:
+                min_score = score
+                best_pair = ((bx, by), (lx, ly))
+        
+        if best_pair:
+            box, ball = best_pair
+            final_samples.append((box, ball))
+            position_counts[box] += 1
+            position_counts[ball] += 1
+            
+    # 5. Deterministic Shuffle
+    # The list is currently sorted by vector length (rare first).
+    # We shuffle it deterministically to mix them up for the iterator.
+    rng = random.Random(42)
+    rng.shuffle(final_samples)
+    
+    _stratified_polar_sampler_iterator = iter(final_samples)
+    print(f"Deterministic Spatial Sampling: Prepared {len(final_samples)} samples.")
+
+def _deterministic_spatial_sampling(width, height):
+    global _stratified_polar_sampler_iterator
+    if _stratified_polar_sampler_iterator is None:
+        print("Notice: Deterministic Spatial sampler not initialized. Auto-initializing (N=1000)...")
+        _initialize_deterministic_spatial_sampler(1000, width, height)
+    
+    try:
+        return next(_stratified_polar_sampler_iterator)
+    except StopIteration:
+        print("Error: Ran out of samples.")
+        return _uniform_sampling(width, height)
+
+# (16)
+def _initialize_fully_deterministic_spatial_sampler(n_samples, width, height):
+    """
+    Fully Deterministic Spatial Sampling (Flag 16).
+    Improvements over Flag 15:
+    1. Score function minimizes sum of squares (L2) instead of sum (L1) to enforce
+       individual uniformity for both Box and Ball positions.
+    2. Removes 'random.shuffle' entirely. Uses a deterministic prime stride
+       to mix the samples (which are generated in rare-first order).
+    """
+    global _stratified_polar_sampler_iterator
+    
+    print(f"Fully Deterministic Spatial Sampling: Computing pairs for grid ({width}x{height})...")
+    
+    # 1. Identify all valid vectors and their availability
+    vectors = []
+    for dy in range(-(height - 1), height):
+        for dx in range(-(width - 1), width):
+            if dx == 0 and dy == 0: continue
+            avail = (width - abs(dx)) * (height - abs(dy))
+            vectors.append({'vec': (dx, dy), 'avail': avail})
+            
+    # 2. Determine counts per vector
+    vectors.sort(key=lambda x: x['avail'])
+    
+    num_vectors = len(vectors)
+    base_count = n_samples // num_vectors
+    remainder = n_samples % num_vectors
+    
+    tasks = []
+    for i, item in enumerate(vectors):
+        count = base_count
+        if i >= (num_vectors - remainder):
+            count += 1
+        for _ in range(count):
+            tasks.append(item)
+            
+    # 3. Sort tasks by availability (Rare First)
+    tasks.sort(key=lambda x: x['avail'])
+    
+    # 4. Greedy Filling with L2 Score
+    position_counts = collections.defaultdict(int)
+    final_samples = []
+    
+    for i, task in enumerate(tasks):
+        dx, dy = task['vec']
+        
+        min_bx, max_bx = max(0, -dx), min(width, width - dx)
+        min_by, max_by = max(0, -dy), min(height, height - dy)
+        
+        valid_boxes = []
+        for by in range(min_by, max_by):
+            for bx in range(min_bx, max_bx):
+                valid_boxes.append((bx, by))
+        
+        best_pair = None
+        min_score = float('inf')
+        
+        # Deterministic Tie-Breaker Offset
+        offset = (i * 7919) % len(valid_boxes)
+        
+        for k in range(len(valid_boxes)):
+            idx = (k + offset) % len(valid_boxes)
+            bx, by = valid_boxes[idx]
+            lx, ly = bx + dx, by + dy
+            
+            # Score: Sum of squares penalizes peaks more than simple sum.
+            # This ensures both box and ball distributions remain flat.
+            c_box = position_counts[(bx, by)]
+            c_ball = position_counts[(lx, ly)]
+            score = (c_box * c_box) + (c_ball * c_ball)
+            
+            if score < min_score:
+                min_score = score
+                best_pair = ((bx, by), (lx, ly))
+        
+        if best_pair:
+            box, ball = best_pair
+            final_samples.append((box, ball))
+            position_counts[box] += 1
+            position_counts[ball] += 1
+            
+    # 5. Deterministic Mixing (No Random Shuffle)
+    # The list 'final_samples' is sorted by vector rarity (Rare -> Common).
+    # We want to disperse these rare vectors uniformly throughout the sequence.
+    # We use a prime stride to map the sorted index 'i' to a destination index.
+    stride = 997
+    while math.gcd(stride, n_samples) != 1:
+        stride += 1
+        
+    mixed_samples = [None] * n_samples
+    for i in range(n_samples):
+        # Scatter the i-th sorted sample to a strided position
+        dest_idx = (i * stride) % n_samples
+        mixed_samples[dest_idx] = final_samples[i]
+    
+    _stratified_polar_sampler_iterator = iter(mixed_samples)
+    print(f"Fully Deterministic Spatial Sampling: Prepared {len(mixed_samples)} samples.")
+
+def _fully_deterministic_spatial_sampling(width, height):
+    global _stratified_polar_sampler_iterator
+    if _stratified_polar_sampler_iterator is None:
+        print("Notice: Fully Deterministic Spatial sampler not initialized. Auto-initializing (N=1000)...")
+        _initialize_fully_deterministic_spatial_sampler(1000, width, height)
+    
+    try:
+        return next(_stratified_polar_sampler_iterator)
+    except StopIteration:
+        print("Error: Ran out of samples.")
+        return _uniform_sampling(width, height)
+
+# (17)
+def _initialize_fully_deterministic_spatial_sampler_v3(n_samples, width, height):
+    """
+    Fully Deterministic Spatial Sampling V3 (Flag 17).
+    Optimizes for absolute position uniformity using Cubic Scoring and Center-Preference.
+    
+    Changes from Flag 16:
+    1. Score = (box_count^3 + ball_count^3). Penalizes peaks more aggressively.
+    2. Adds a 'Center Preference' tie-breaker. When counts are similar, we prefer
+       placing flexible vectors near the center. This reserves the edges for
+       the rare vectors that strictly require them, preventing edge overcrowding.
+    """
+    global _stratified_polar_sampler_iterator
+    
+    print(f"Fully Deterministic Spatial Sampling V3: Computing pairs for grid ({width}x{height})...")
+    
+    # 1. Vectors & Availability
+    vectors = []
+    for dy in range(-(height - 1), height):
+        for dx in range(-(width - 1), width):
+            if dx == 0 and dy == 0: continue
+            avail = (width - abs(dx)) * (height - abs(dy))
+            vectors.append({'vec': (dx, dy), 'avail': avail})
+            
+    vectors.sort(key=lambda x: x['avail'])
+    
+    # 2. Counts
+    num_vectors = len(vectors)
+    base_count = n_samples // num_vectors
+    remainder = n_samples % num_vectors
+    
+    tasks = []
+    for i, item in enumerate(vectors):
+        count = base_count
+        if i >= (num_vectors - remainder):
+            count += 1
+        for _ in range(count):
+            tasks.append(item)
+            
+    # 3. Sort Rare First
+    tasks.sort(key=lambda x: x['avail'])
+    
+    # 4. Greedy with Cubic Score + Center Pref
+    position_counts = collections.defaultdict(int)
+    final_samples = []
+    
+    cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
+    
+    for i, task in enumerate(tasks):
+        dx, dy = task['vec']
+        min_bx, max_bx = max(0, -dx), min(width, width - dx)
+        min_by, max_by = max(0, -dy), min(height, height - dy)
+        
+        valid_boxes = []
+        for by in range(min_by, max_by):
+            for bx in range(min_bx, max_bx):
+                valid_boxes.append((bx, by))
+        
+        best_pair = None
+        min_score = float('inf')
+        
+        offset = (i * 7919) % len(valid_boxes)
+        
+        for k in range(len(valid_boxes)):
+            idx = (k + offset) % len(valid_boxes)
+            bx, by = valid_boxes[idx]
+            lx, ly = bx + dx, by + dy
+            
+            c_box = position_counts[(bx, by)]
+            c_ball = position_counts[(lx, ly)]
+            
+            # Cubic Score: Stronger penalty for peaks than Square
+            score = (c_box * c_box * c_box) + (c_ball * c_ball * c_ball)
+            
+            # Center Preference Tie-breaker:
+            # If scores are roughly equal, prefer positions closer to center.
+            # This saves the edges for the rare vectors that MUST use them.
+            d_box = abs(bx - cx) + abs(by - cy)
+            d_ball = abs(lx - cx) + abs(ly - cy)
+            score += (d_box + d_ball) * 0.01
+            
+            if score < min_score:
+                min_score = score
+                best_pair = ((bx, by), (lx, ly))
+        
+        if best_pair:
+            box, ball = best_pair
+            final_samples.append((box, ball))
+            position_counts[box] += 1
+            position_counts[ball] += 1
+            
+    # 5. Deterministic Mixing
+    stride = 997
+    while math.gcd(stride, n_samples) != 1:
+        stride += 1
+        
+    mixed_samples = [None] * n_samples
+    for i in range(n_samples):
+        dest_idx = (i * stride) % n_samples
+        mixed_samples[dest_idx] = final_samples[i]
+        
+    _stratified_polar_sampler_iterator = iter(mixed_samples)
+    print(f"Fully Deterministic Spatial Sampling V3: Prepared {len(mixed_samples)} samples.")
+
+def _fully_deterministic_spatial_sampling_v3(width, height):
+    global _stratified_polar_sampler_iterator
+    if _stratified_polar_sampler_iterator is None:
+        print("Notice: Fully Deterministic Spatial V3 sampler not initialized. Auto-initializing (N=1000)...")
+        _initialize_fully_deterministic_spatial_sampler_v3(1000, width, height)
     
     try:
         return next(_stratified_polar_sampler_iterator)
@@ -869,7 +1360,7 @@ def show_sampling_distribution_hist(sampling_func, width, height, n_samples=500,
     if sampling_func.__name__ == '_distance_based_sampling' or (sampling_func.__name__ == 'generate_positions' and RANDOM_FLAG == 1):
         print(f"Fallback to Uniform Sampling: {FALLBACK_COUNT}/{n_samples} ({FALLBACK_COUNT/n_samples*100:.2f}%)")
 
-    fig, axes = plt.subplots(1, 5, figsize=(32, 6))
+    fig, axes = plt.subplots(1, 6, figsize=(38, 6))
     func_name = sampling_func.__name__.replace('_', ' ').title()
     fig.suptitle(f'Distribution for {n_samples} Samples ({func_name})', fontsize=16)
 
@@ -936,6 +1427,18 @@ def show_sampling_distribution_hist(sampling_func, width, height, n_samples=500,
     axes[4].grid(True, linestyle='--', alpha=0.3)
     fig.colorbar(h_box[3], ax=axes[4], label='Count')
 
+    # Total Position Density (Box + Ball)
+    combined_x = ball_x_list + box_x_list
+    combined_y = ball_y_list + box_y_list
+    h_total = axes[5].hist2d(combined_x, combined_y, bins=[bins_box_x, bins_box_y], cmap='Greens', vmin=0)
+    axes[5].set_title(f'Total Position Density (Box + Ball)')
+    axes[5].set_xlabel('X')
+    axes[5].set_ylabel('Y')
+    axes[5].set_aspect('equal')
+    axes[5].invert_yaxis()
+    axes[5].grid(True, linestyle='--', alpha=0.3)
+    fig.colorbar(h_total[3], ax=axes[5], label='Count')
+
     print('\nTheta histogram (radians) (bin_range -> count):')
     for i in range(len(th_counts)): print(f'  [{theta_edges[i]:.2f}, {theta_edges[i+1]:.2f}) -> {th_counts[i]}')
 
@@ -965,6 +1468,16 @@ def init_sampler(width, height, n_samples, r_bins=None, theta_bins=None):
         _initialize_sobol_ball_diversity_sampler(n_samples, width, height)
     elif RANDOM_FLAG == 12:
         _initialize_balanced_spatial_sampler(n_samples, width, height)
+    elif RANDOM_FLAG == 13:
+        _initialize_edge_biased_spatial_sampler(n_samples, width, height)
+    elif RANDOM_FLAG == 14:
+        _initialize_edge_biased_spatial_sampler_v2(n_samples, width, height)
+    elif RANDOM_FLAG == 15:
+        _initialize_deterministic_spatial_sampler(n_samples, width, height)
+    elif RANDOM_FLAG == 16:
+        _initialize_fully_deterministic_spatial_sampler(n_samples, width, height)
+    elif RANDOM_FLAG == 17:
+        _initialize_fully_deterministic_spatial_sampler_v3(n_samples, width, height)
 
 def generate_positions(width, height):
     """
@@ -997,6 +1510,16 @@ def generate_positions(width, height):
         return _sobol_ball_diversity_sampling(width, height)
     elif RANDOM_FLAG == 12:
         return _balanced_spatial_sampling(width, height)
+    elif RANDOM_FLAG == 13:
+        return _edge_biased_spatial_sampling(width, height)
+    elif RANDOM_FLAG == 14:
+        return _edge_biased_spatial_sampling_v2(width, height)
+    elif RANDOM_FLAG == 15:
+        return _deterministic_spatial_sampling(width, height)
+    elif RANDOM_FLAG == 16:
+        return _fully_deterministic_spatial_sampling(width, height)
+    elif RANDOM_FLAG == 17:
+        return _fully_deterministic_spatial_sampling_v3(width, height)
     else:
         # Default to uniform sampling if the flag is not recognized
         return _uniform_sampling(width, height)
@@ -1005,10 +1528,10 @@ def generate_positions(width, height):
 if __name__ == '__main__':
     # Test Configuration: Change this flag to test different strategies
     # 0:Stratified, 1:Distance-Based, 2:Uniform, 3:Sobol-Cartesian, 4:Sobol-Polar, 5:Stratified-Polar, 6:Stratified-Difficulty, 7:Stratified-Hand-Difficulty, 8:Simple-Random, 9:Numpy-Random, 10:Redundancy-Aware, 11:Sobol-Ball-Diversity, 12=Balanced-Spatial
-    RANDOM_FLAG = 12
+    RANDOM_FLAG = 17 # 15-17
 
     grid_width, grid_height = 8, 6
-    n_samples_for_hist = 2000
+    n_samples_for_hist = 164
     r_bins_for_hist = 10
     theta_bins_for_hist = 12
 

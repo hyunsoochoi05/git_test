@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 from scipy.stats import qmc
 import itertools
 
-# Sampling strategy flag: 0=stratified, 1=distance-based, 2=uniform, 3=sobol_cartesian, 4=sobol_polar, 5=stratified_polar, 6=stratified_difficulty, 7=stratified_hand_difficulty, 8=simple_random, 9=numpy_random, 10=redundancy_aware, 11=sobol_ball_diversity, 12=balanced_spatial, 13=edge_biased_spatial, 14=edge_biased_spatial_v2, 15=deterministic_spatial, 16=fully_deterministic_spatial, 17=fully_deterministic_spatial_v3
-RANDOM_FLAG = 17
+# Sampling strategy flag: 0=stratified, 1=distance-based, 2=uniform, 3=sobol_cartesian, 4=sobol_polar, 5=stratified_polar, 6=stratified_difficulty, 7=stratified_hand_difficulty, 8=simple_random, 9=numpy_random, 10=redundancy_aware, 11=sobol_ball_diversity, 12=balanced_spatial, 13=edge_biased_spatial, 14=edge_biased_spatial_v2, 15=deterministic_spatial, 16=fully_deterministic_spatial, 17=fully_deterministic_spatial_v3, 18=randomized_greedy_spatial
+RANDOM_FLAG = 18
 
 # Global counter to track fallback events in distance-based sampling
 FALLBACK_COUNT = 0
@@ -1288,6 +1288,108 @@ def _fully_deterministic_spatial_sampling_v3(width, height):
         print("Error: Ran out of samples.")
         return _uniform_sampling(width, height)
 
+# (18)
+def _initialize_randomized_greedy_spatial_sampler(n_samples, width, height):
+    """
+    Randomized Greedy Spatial Sampling (Flag 18).
+    Combines the 'Rare-First' logic of 15-17 with randomness.
+    
+    Logic:
+    1. Determine exact vector quotas (Relative Uniformity).
+    2. Process vectors from Rare (Long) to Common (Short).
+    3. For each vector, find all valid positions.
+    4. SHUFFLE the valid positions (Restores Randomness).
+    5. Pick the position that minimizes (BoxCount + BallCount).
+       Tie-breaker: Minimize |BoxCount - BallCount| to prefer (1,1) over (0,2).
+    """
+    global _stratified_polar_sampler_iterator
+    
+    print(f"Randomized Greedy Spatial Sampling: Computing pairs for grid ({width}x{height})...")
+    
+    # 1. Vectors & Availability
+    vectors = []
+    for dy in range(-(height - 1), height):
+        for dx in range(-(width - 1), width):
+            if dx == 0 and dy == 0: continue
+            avail = (width - abs(dx)) * (height - abs(dy))
+            vectors.append({'vec': (dx, dy), 'avail': avail})
+            
+    vectors.sort(key=lambda x: x['avail'])
+    
+    # 2. Counts
+    num_vectors = len(vectors)
+    base_count = n_samples // num_vectors
+    remainder = n_samples % num_vectors
+    
+    tasks = []
+    for i, item in enumerate(vectors):
+        count = base_count
+        if i >= (num_vectors - remainder):
+            count += 1
+        for _ in range(count):
+            tasks.append(item)
+            
+    # 3. Sort Rare First
+    tasks.sort(key=lambda x: x['avail'])
+    
+    # 4. Randomized Greedy Filling
+    position_counts = collections.defaultdict(int)
+    final_samples = []
+    
+    for task in tasks:
+        dx, dy = task['vec']
+        min_bx, max_bx = max(0, -dx), min(width, width - dx)
+        min_by, max_by = max(0, -dy), min(height, height - dy)
+        
+        valid_boxes = []
+        for by in range(min_by, max_by):
+            for bx in range(min_bx, max_bx):
+                valid_boxes.append((bx, by))
+        
+        # Randomize candidates to break patterns
+        random.shuffle(valid_boxes)
+        
+        best_pair = None
+        # Min score tuple: (Sum, Diff)
+        min_score = (float('inf'), float('inf'))
+        
+        for bx, by in valid_boxes:
+            lx, ly = bx + dx, by + dy
+            
+            c_box = position_counts[(bx, by)]
+            c_ball = position_counts[(lx, ly)]
+            
+            # Primary: Sum (Fill empty spots). Secondary: Diff (Balance Box/Ball).
+            current_score = (c_box + c_ball, abs(c_box - c_ball))
+            
+            if current_score < min_score:
+                min_score = current_score
+                best_pair = ((bx, by), (lx, ly))
+        
+        if best_pair:
+            box, ball = best_pair
+            final_samples.append((box, ball))
+            position_counts[box] += 1
+            position_counts[ball] += 1
+            
+    # 5. Final Shuffle (Essential because tasks were sorted by length)
+    random.shuffle(final_samples)
+        
+    _stratified_polar_sampler_iterator = iter(final_samples)
+    print(f"Randomized Greedy Spatial Sampling: Prepared {len(final_samples)} samples.")
+
+def _randomized_greedy_spatial_sampling(width, height):
+    global _stratified_polar_sampler_iterator
+    if _stratified_polar_sampler_iterator is None:
+        print("Notice: Randomized Greedy Spatial sampler not initialized. Auto-initializing (N=1000)...")
+        _initialize_randomized_greedy_spatial_sampler(1000, width, height)
+    
+    try:
+        return next(_stratified_polar_sampler_iterator)
+    except StopIteration:
+        print("Error: Ran out of samples.")
+        return _uniform_sampling(width, height)
+
 
 # --- Drawing and Plotting ---
 
@@ -1481,6 +1583,8 @@ def init_sampler(width, height, n_samples, r_bins=None, theta_bins=None):
         _initialize_fully_deterministic_spatial_sampler(n_samples, width, height)
     elif RANDOM_FLAG == 17:
         _initialize_fully_deterministic_spatial_sampler_v3(n_samples, width, height)
+    elif RANDOM_FLAG == 18:
+        _initialize_randomized_greedy_spatial_sampler(n_samples, width, height)
 
 def generate_positions(width, height):
     """
@@ -1523,6 +1627,8 @@ def generate_positions(width, height):
         return _fully_deterministic_spatial_sampling(width, height)
     elif RANDOM_FLAG == 17:
         return _fully_deterministic_spatial_sampling_v3(width, height)
+    elif RANDOM_FLAG == 18:
+        return _randomized_greedy_spatial_sampling(width, height)
     else:
         # Default to uniform sampling if the flag is not recognized
         return _uniform_sampling(width, height)
@@ -1531,7 +1637,7 @@ def generate_positions(width, height):
 if __name__ == '__main__':
     # Test Configuration: Change this flag to test different strategies
     # 0:Stratified, 1:Distance-Based, 2:Uniform, 3:Sobol-Cartesian, 4:Sobol-Polar, 5:Stratified-Polar, 6:Stratified-Difficulty, 7:Stratified-Hand-Difficulty, 8:Simple-Random, 9:Numpy-Random, 10:Redundancy-Aware, 11:Sobol-Ball-Diversity, 12=Balanced-Spatial
-    RANDOM_FLAG = 17 # 15-17
+    RANDOM_FLAG = 18
 
     grid_width, grid_height = 8, 6
     n_samples_for_hist = 164

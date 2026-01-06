@@ -1244,7 +1244,7 @@ def _initialize_fully_deterministic_spatial_sampler_v3(n_samples, width, height)
             c_ball = position_counts[(lx, ly)]
             
             # Cubic Score: Stronger penalty for peaks than Square
-            score = (c_box * c_box * c_box) + (c_ball * c_ball * c_ball)
+            score = (c_box ** 3) + (c_ball ** 3)
             
             # Center Preference Tie-breaker:
             # If scores are roughly equal, prefer positions closer to center.
@@ -1414,6 +1414,7 @@ def show_sampling_distribution_hist(sampling_func, width, height, n_samples=500,
     axes[3].invert_yaxis()
     axes[3].grid(True, linestyle='--', alpha=0.3)
     fig.colorbar(h_ball[3], ax=axes[3], label='Count')
+    print(f"Ball Position Density: Min={np.min(h_ball[0])}, Max={np.max(h_ball[0])}")
 
     # Box Position Density (2D Histogram)
     bins_box_x = np.arange(-0.5, width + 0.5, 1)
@@ -1426,6 +1427,7 @@ def show_sampling_distribution_hist(sampling_func, width, height, n_samples=500,
     axes[4].invert_yaxis()
     axes[4].grid(True, linestyle='--', alpha=0.3)
     fig.colorbar(h_box[3], ax=axes[4], label='Count')
+    print(f"Box Position Density: Min={np.min(h_box[0])}, Max={np.max(h_box[0])}")
 
     # Total Position Density (Box + Ball)
     combined_x = ball_x_list + box_x_list
@@ -1438,6 +1440,7 @@ def show_sampling_distribution_hist(sampling_func, width, height, n_samples=500,
     axes[5].invert_yaxis()
     axes[5].grid(True, linestyle='--', alpha=0.3)
     fig.colorbar(h_total[3], ax=axes[5], label='Count')
+    print(f"Total Position Density: Min={np.min(h_total[0])}, Max={np.max(h_total[0])}")
 
     print('\nTheta histogram (radians) (bin_range -> count):')
     for i in range(len(th_counts)): print(f'  [{theta_edges[i]:.2f}, {theta_edges[i+1]:.2f}) -> {th_counts[i]}')
